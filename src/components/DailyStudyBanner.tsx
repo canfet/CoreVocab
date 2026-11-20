@@ -1,4 +1,5 @@
 import React from 'react';
+import { todayLocal } from '../utils/date';
 import { CheckCircle2 } from 'lucide-react';
 import { DailyStudyProgress } from '../types';
 import { CURRICULUM_STAGES } from '../data/curriculum';
@@ -25,7 +26,7 @@ export const DailyStudyBanner: React.FC<DailyStudyBannerProps> = ({
     dailyGoal: 5,
     masteredWords: [],
     todayStudiedWords: [],
-    lastStudyDate: new Date().toISOString().slice(0, 10),
+    lastStudyDate: todayLocal(),
     streakDays: 1
   };
 

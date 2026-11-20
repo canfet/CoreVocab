@@ -1,7 +1,10 @@
 import React from 'react';
-import { GraduationCap, BookMarked } from 'lucide-react';
+import { GraduationCap, BookMarked, Cloud, CloudOff } from 'lucide-react';
+import type { SyncStatus } from '../hooks/useCloudSync';
 
 interface NavbarProps {
+  onOpenSync?: () => void;
+  syncStatus?: SyncStatus;
   onOpenSaved?: () => void;
   onOpenDailyStudy: () => void;
   onOpenRules: () => void;
@@ -14,7 +17,15 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenDailyStudy,
   onOpenRules,
   currentLevelNumber = 1,
+  onOpenSync,
+  syncStatus = 'off',
 }) => {
+  const dot =
+    syncStatus === 'ok' ? 'bg-emerald-500'
+    : syncStatus === 'error' ? 'bg-rose-500'
+    : syncStatus === 'offline' ? 'bg-amber-500'
+    : syncStatus === 'syncing' || syncStatus === 'idle' ? 'bg-sky-500 animate-pulse'
+    : '';
   return (
     <header className="border-b-2 border-slate-900 bg-white sticky top-0 z-30">
       <div className="max-w-7xl mx-auto px-2 sm:px-6 h-12 sm:h-14 flex items-center justify-between">
@@ -43,8 +54,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <BookMarked className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-indigo-600" />
             <span className="hidden sm:inline">規則庫</span>
-          </button>          
+          </button>
         </div>
+
+        {onOpenSync && (
+          <button
+            id="nav-sync-btn"
+            onClick={onOpenSync}
+            className="relative inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-3 py-1.5 sm:py-1 text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded border border-slate-300 transition-colors cursor-pointer whitespace-nowrap"
+            title="雲端同步（跨裝置）"
+          >
+            {syncStatus === 'off' ? <CloudOff className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-slate-500" /> : <Cloud className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-600" />}
+            <span className="hidden sm:inline">同步</span>
+            {dot && <span className={`absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full border border-white ${dot}`} />}
+          </button>
+        )}
       </div>
     </header>
   );

@@ -1,5 +1,5 @@
 /**
- * Text formatting utilities for Core Vocab
+ * Text formatting utilities for CoreVocab
  */
 
 /**

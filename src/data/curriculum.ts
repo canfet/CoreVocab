@@ -1,4 +1,5 @@
 import { CurriculumStage, CurriculumWordItem, StudyLevel } from '../types';
+import { todayLocal } from '../utils/date';
 import { PRESET_WORDS } from './presetWords';
 import { shortGloss } from '../utils/wordGloss';
 
@@ -703,6 +704,6 @@ export const INITIAL_STUDY_PROGRESS = {
   dailyGoal: DEFAULT_DAILY_GOAL,
   masteredWords: [] as string[],
   todayStudiedWords: [] as string[],
-  lastStudyDate: new Date().toISOString().slice(0, 10),
+  lastStudyDate: todayLocal(),
   streakDays: 1
 };

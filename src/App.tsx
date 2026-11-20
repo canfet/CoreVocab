@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from 'react';
 import { Navbar } from './components/Navbar';
 import { HeaderCard } from './components/HeaderCard';
 import { MorphemeDeconstructionCard } from './components/MorphemeDeconstructionCard';
@@ -11,12 +11,17 @@ const SavedWordsDrawer = lazy(() => import('./components/SavedWordsDrawer').then
 const DailyStudyModal = lazy(() => import('./components/DailyStudyModal').then((m) => ({ default: m.DailyStudyModal })));
 const AudioSettingsModal = lazy(() => import('./components/AudioSettingsModal').then((m) => ({ default: m.AudioSettingsModal })));
 const RulesReferenceModal = lazy(() => import('./components/RulesReferenceModal').then((m) => ({ default: m.RulesReferenceModal })));
+const SyncModal = lazy(() => import('./components/SyncModal').then((m) => ({ default: m.SyncModal })));
 const VocabularyQuizModal = lazy(() => import('./components/VocabularyQuizModal').then((m) => ({ default: m.VocabularyQuizModal })));
 import { PRESET_WORDS } from './data/presetWords';
 import { INITIAL_STUDY_PROGRESS, CURRICULUM_STAGES } from './data/curriculum';
 import { generateFallbackAnalysis } from './utils/fallbackGenerator';
 import { WordAnalysis, DailyStudyProgress, StudyLevel, AudioSettings } from './types';
 import { initSpeechEngine, speakWord } from './utils/speech';
+import { useCloudSync } from './hooks/useCloudSync';
+import { todayLocal } from './utils/date';
+import { useVersionCheck } from './hooks/useVersionCheck';
+import type { SyncPayload } from './lib/cloudSync';
 import { AlertCircle, CheckCircle2 } from 'lucide-react';
 
 // Helper to determine initial word based on user's last viewed word or current study level
@@ -53,6 +58,23 @@ const getInitialWordAnalysis = (): WordAnalysis => {
   }
 };
 
+// 跨日時重置「今日已學」並計算連續天數（載入本機資料與套用雲端資料時共用）
+const normalizeProgress = (parsed: DailyStudyProgress): DailyStudyProgress => {
+  const todayStr = todayLocal();
+  if (parsed.lastStudyDate === todayStr) return parsed;
+  const lastDate = new Date(parsed.lastStudyDate);
+  const nowDate = new Date(todayStr);
+  const diffDays = Math.round((nowDate.getTime() - lastDate.getTime()) / (1000 * 3600 * 24));
+  return {
+    ...parsed,
+    todayStudiedWords: [],
+    lastStudyDate: todayStr,
+    streakDays: diffDays === 1 ? parsed.streakDays + 1 : (diffDays === 0 ? parsed.streakDays : 1)
+  };
+};
+
+const wordToAnalysis = (w: string): WordAnalysis => PRESET_WORDS[w] || generateFallbackAnalysis(w);
+
 export default function App() {
   const [currentAnalysis, setCurrentAnalysis] = useState<WordAnalysis>(getInitialWordAnalysis);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -66,6 +88,8 @@ export default function App() {
   const [isDailyStudyOpen, setIsDailyStudyOpen] = useState(false);
   const [isQuizOpen, setIsQuizOpen] = useState(false);
   const [isAudioSettingsOpen, setIsAudioSettingsOpen] = useState(false);
+  const [isSyncOpen, setIsSyncOpen] = useState(false);
+  const userSearchedRef = useRef(false);
 
   const handleOpenRules = (options?: {
     tab?: 'prefixes' | 'assimilation' | 'dualStems' | 'phonology' | 'suffixes' | 'strata';
@@ -118,24 +142,7 @@ export default function App() {
   const [studyProgress, setStudyProgress] = useState<DailyStudyProgress>(() => {
     try {
       const stored = localStorage.getItem('morpho_daily_progress_v2');
-      if (stored) {
-        const parsed: DailyStudyProgress = JSON.parse(stored);
-        const todayStr = new Date().toISOString().slice(0, 10);
-        // Check date for streak calculation
-        if (parsed.lastStudyDate !== todayStr) {
-          const lastDate = new Date(parsed.lastStudyDate);
-          const nowDate = new Date(todayStr);
-          const diffDays = Math.round((nowDate.getTime() - lastDate.getTime()) / (1000 * 3600 * 24));
-          return {
-            ...parsed,
-            todayStudiedWords: [],
-            lastStudyDate: todayStr,
-            streakDays: diffDays === 1 ? parsed.streakDays + 1 : (diffDays === 0 ? parsed.streakDays : 1)
-          };
-        }
-        return parsed;
-      }
-      return INITIAL_STUDY_PROGRESS;
+      return stored ? normalizeProgress(JSON.parse(stored)) : INITIAL_STUDY_PROGRESS;
     } catch {
       return INITIAL_STUDY_PROGRESS;
     }
@@ -168,6 +175,47 @@ export default function App() {
     }
   }, [studyProgress]);
 
+  // ===== 雲端同步（Google Apps Script，免登入）=====
+  // 欄位順序需與後端 sanitize_ 一致，才不會被誤判成「使用者編輯過」
+  const syncValues = useMemo<SyncPayload>(() => ({
+    saved: savedWords.map((w) => w.word.toLowerCase()),
+    mastered: studyProgress.masteredWords,
+    progress: {
+      currentLevel: studyProgress.currentLevel,
+      dailyGoal: studyProgress.dailyGoal,
+      todayStudiedWords: studyProgress.todayStudiedWords,
+      lastStudyDate: studyProgress.lastStudyDate,
+      streakDays: studyProgress.streakDays
+    },
+    audio: {
+      lang: audioSettings.lang,
+      rate: audioSettings.rate,
+      autoPlayOnSearch: !!audioSettings.autoPlayOnSearch
+    },
+    lastWord: currentAnalysis.word.toLowerCase().trim()
+  }), [savedWords, studyProgress, audioSettings, currentAnalysis]);
+
+  const isNewVersionAvailable = useVersionCheck();
+
+  const cloud = useCloudSync({
+    values: syncValues,
+    apply: (patch) => {
+      if (patch.saved) setSavedWords(patch.saved.map(wordToAnalysis));
+      if (patch.mastered || patch.progress) {
+        setStudyProgress((prev) =>
+          normalizeProgress({
+            ...prev,
+            ...(patch.progress || {}),
+            ...(patch.mastered ? { masteredWords: patch.mastered } : {})
+          })
+        );
+      }
+      if (patch.audio) setAudioSettings((prev) => ({ ...prev, ...patch.audio }));
+      // 使用者已經自己查過單字就不要搶走畫面
+      if (patch.lastWord && !userSearchedRef.current) setCurrentAnalysis(wordToAnalysis(patch.lastWord));
+    }
+  });
+
   // Track studied word
   const recordWordStudied = (word: string) => {
     const clean = word.toLowerCase();
@@ -184,6 +232,7 @@ export default function App() {
     const cleanWord = wordToSearch.trim().toLowerCase().replace(/[^a-z-]/g, '');
     if (!cleanWord) return;
 
+    userSearchedRef.current = true;
     setErrorMessage(null);
     recordWordStudied(cleanWord);
 
@@ -296,12 +345,21 @@ export default function App() {
     <div className="min-h-screen bg-[#F1F5F9] text-slate-900 flex flex-col font-sans selection:bg-slate-900 selection:text-yellow-300">
       {/* Top Navbar */}
       <Navbar
+        onOpenSync={() => setIsSyncOpen(true)}
+        syncStatus={cloud.status}
         onOpenSaved={() => setIsSavedDrawerOpen(true)}
         onOpenDailyStudy={() => setIsDailyStudyOpen(true)}
         onOpenRules={() => handleOpenRules({ tab: 'prefixes', query: '' })}
         savedCount={savedWords.length}
         currentLevelNumber={currentStage.levelNumber || 1}
       />
+
+      {isNewVersionAvailable && (
+        <div role="status" className="bg-yellow-300 text-slate-900 text-xs sm:text-sm font-bold py-2 px-4 border-b-2 border-slate-900 flex items-center justify-center gap-3">
+          <span>🔄 網站有新版本了，重新整理即可使用最新內容。</span>
+          <button onClick={() => window.location.reload()} className="px-2 py-0.5 bg-slate-900 text-yellow-300 rounded cursor-pointer">重新整理</button>
+        </div>
+      )}
 
       {/* Notification Toast */}
       {notificationMsg && (
@@ -399,6 +457,21 @@ export default function App() {
           onSelectWord={handleSearchWord}
           onRemoveWord={handleRemoveSavedWord}
           onClearAll={handleClearAllSaved}
+        />
+
+        <SyncModal
+          isOpen={isSyncOpen}
+          onClose={() => setIsSyncOpen(false)}
+          configured={cloud.configured}
+          code={cloud.code}
+          status={cloud.status}
+          lastSyncedAt={cloud.lastSyncedAt}
+          errorMsg={cloud.errorMsg}
+          onCreate={cloud.create}
+          onJoin={cloud.join}
+          onSyncNow={cloud.syncNow}
+          onUnlink={cloud.unlink}
+          onRemoveCloud={cloud.removeCloud}
         />
 
         <VocabularyQuizModal

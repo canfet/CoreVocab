@@ -1,6 +1,0 @@
-{
-  "name": "核心詞彙學習 (Core Vocab)",
-  "description": "Expert linguist and interactive learning coach for English morphological decomposition, phonetic assimilation, and etymological word families.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
