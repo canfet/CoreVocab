@@ -19,4 +19,8 @@ window.APP_CONFIG = { API_URL: ${JSON.stringify(url)} };
 `;
 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, 'config.js'), out);
+if (!url && process.env.GITHUB_ACTIONS) {
+  // 在 Actions 的執行摘要頂端顯示黃色警告，避免「部署成功但同步沒開」沒人發現
+  console.log('::warning title=雲端同步未啟用::APPS_SCRIPT_URL 是空的。請確認它設在 Settings → Secrets and variables → Actions → Variables 分頁的「Repository variables」（不是 Secrets，也不是 Environment variables），名稱完全相同，然後重新執行部署。');
+}
 console.log(url ? `已寫入 ${dir}/config.js（雲端同步：啟用）` : `已寫入 ${dir}/config.js（雲端同步：未設定，停用）`);
