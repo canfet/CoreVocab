@@ -1,0 +1,63 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Public basic user metadata profile",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string" },
+        "lastActiveAt": { "type": "string" }
+      },
+      "required": ["userId"]
+    },
+    "StudyProgress": {
+      "title": "StudyProgress",
+      "description": "User daily progressive morphology curriculum progress and streak metrics",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "currentLevel": { "type": "string", "maxLength": 30 },
+        "dailyGoal": { "type": "number" },
+        "masteredWords": { "type": "array" },
+        "todayStudiedWords": { "type": "array" },
+        "lastStudyDate": { "type": "string", "maxLength": 20 },
+        "streakDays": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "currentLevel", "dailyGoal", "masteredWords", "streakDays"]
+    },
+    "SavedWordItem": {
+      "title": "SavedWordItem",
+      "description": "Morphological analysis card bookmarked by the user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "word": { "type": "string", "maxLength": 50 },
+        "ipa": { "type": "string", "maxLength": 80 },
+        "pos": { "type": "string", "maxLength": 40 },
+        "meaningZh": { "type": "string", "maxLength": 200 },
+        "analysisJson": { "type": "string", "maxLength": 50000 },
+        "savedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "word", "meaningZh", "analysisJson"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores user basic account metadata"
+    },
+    "/users/{userId}/studyProgress/{progressId}": {
+      "schema": "StudyProgress",
+      "description": "Stores user daily study streak, curriculum level and mastered words"
+    },
+    "/users/{userId}/savedWords/{wordId}": {
+      "schema": "SavedWordItem",
+      "description": "Stores saved words and their full morphology analysis"
+    }
+  }
+}
