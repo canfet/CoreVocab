@@ -1,14 +1,10 @@
 /**
  * Pronunciation utility
  *
- * Two engines, chosen per device:
- *  - Recordings: real human audio from dictionaryapi.dev played through one shared HTML5 <audio>
- *    element. It is "unlocked" on the first touch so iOS lets us play it after the async lookup,
- *    and <audio> is not muted by the iOS silent switch (speechSynthesis is).
- *  - TTS: Web Speech API, used for phrases, offline, and when no recording exists.
- *
- * iOS (single words) → recording first, TTS as fallback.
- * Everything else    → TTS first, recording as fallback when TTS is silent/unavailable.
+ * Order: system TTS (Web Speech API) → external audio (Youdao, via <audio>) →
+ * dictionaryapi.dev recording (single words). The external steps only run when the
+ * system TTS is unsupported, errors out, or does not start within 1.5s.
+ * The shared <audio> element is unlocked on the first touch so iOS allows the fallback.
  */
 
 export interface SpeechOptions {
@@ -377,26 +373,26 @@ export function speakWord(
   const isSingleWord = /^[A-Za-z][A-Za-z'-]*$/.test(cleanText);
   const giveUp = (err?: any) => cb.onError?.(err);
 
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
   // 3) dictionaryapi.dev recording (single words only)
   const lastResort = () => {
-    if (!isSingleWord) return giveUp();
+    if (offline || !isSingleWord) return giveUp();
     playRecording(cleanText, targetLang, options, cb).then((ok) => {
       if (alive() && !ok) giveUp();
     });
   };
-  // 2) Web Speech API
-  const tryTTS = () => {
-    if (!hasTTS()) return lastResort();
-    speakTTS(cleanText, targetLang, options, cb, () => { if (alive()) lastResort(); });
+  // 2) External audio (Youdao) played through <audio>: works without a system TTS voice,
+  //    in in-app browsers, and ignores the iOS silent switch.
+  const tryExternal = () => {
+    if (offline) return lastResort();
+    playAudioUrl(directAudioUrl(cleanText, targetLang), options, cb).then((ok) => {
+      if (alive() && !ok) lastResort();
+    });
   };
 
-  // 1) Direct audio, started synchronously inside the tap: works with the iOS silent switch,
-  //    in LINE/FB/IG in-app browsers, and on phones without a TTS voice. Skipped when offline.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    tryTTS();
-    return;
-  }
-  playAudioUrl(directAudioUrl(cleanText, targetLang), options, cb).then((ok) => {
-    if (alive() && !ok) tryTTS();
-  });
+  // 1) System text-to-speech first (works offline, no data sent anywhere).
+  //    If it is unsupported, errors out, or never starts, fall back to the external audio.
+  if (!hasTTS()) return tryExternal();
+  speakTTS(cleanText, targetLang, options, cb, () => { if (alive()) tryExternal(); });
 }

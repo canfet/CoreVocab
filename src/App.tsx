@@ -4,6 +4,7 @@ import { HeaderCard } from './components/HeaderCard';
 import { MorphemeDeconstructionCard } from './components/MorphemeDeconstructionCard';
 import { DailyStudyBanner } from './components/DailyStudyBanner';
 import { MobileStickyActionBar } from './components/MobileStickyActionBar';
+import { InstallPrompt } from './components/InstallPrompt';
 
 // Modals/drawers are only ever shown after a user action (button click), so they're
 // code-split out of the initial bundle instead of being loaded eagerly on first paint.
@@ -483,6 +484,8 @@ export default function App() {
           onSelectWord={handleSearchWord}
         />
       </Suspense>
+
+      <InstallPrompt />
 
       {/* Mobile-Only Sticky Floating Action Bar */}
       <MobileStickyActionBar
