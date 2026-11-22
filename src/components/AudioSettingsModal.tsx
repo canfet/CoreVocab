@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Volume2, Settings2, Check, Play } from 'lucide-react';
 import { AudioSettings } from '../types';
-import { speakWord } from '../utils/speech';
+import { speakWord, isInAppBrowser, isMobileDevice } from '../utils/speech';
 
 interface AudioSettingsModalProps {
   isOpen: boolean;
@@ -22,6 +22,7 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
   const [rate, setRate] = useState<number>(settings.rate || 0.85);
   const [autoPlay, setAutoPlay] = useState<boolean>(!!settings.autoPlayOnSearch);
   const [isPlayingTest, setIsPlayingTest] = useState(false);
+  const [testFailed, setTestFailed] = useState(false);
 
   useEffect(() => {
     setLang(settings.lang || 'en-US');
@@ -33,13 +34,23 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
 
   const handleTestSpeech = () => {
     setIsPlayingTest(true);
+    setTestFailed(false);
+    // Safety net so the button never stays stuck on "播放中"
+    const timeout = window.setTimeout(() => setIsPlayingTest(false), 8000);
+    const done = () => {
+      window.clearTimeout(timeout);
+      setIsPlayingTest(false);
+    };
     speakWord(
       currentWord || 'elucidate',
       { lang, rate },
       {
         onStart: () => setIsPlayingTest(true),
-        onEnd: () => setIsPlayingTest(false),
-        onError: () => setIsPlayingTest(false)
+        onEnd: done,
+        onError: () => {
+          done();
+          setTestFailed(true);
+        }
       }
     );
   };
@@ -181,6 +192,27 @@ export const AudioSettingsModal: React.FC<AudioSettingsModalProps> = ({
               <span>{isPlayingTest ? '播放中...' : '立即試聽'}</span>
             </button>
           </div>
+
+          {(testFailed || isMobileDevice()) && (
+            <div
+              className={`p-3 rounded-lg border text-[11px] leading-relaxed ${
+                testFailed
+                  ? 'bg-red-50 border-red-300 text-red-800'
+                  : 'bg-amber-50 border-amber-300 text-amber-900'
+              }`}
+            >
+              {testFailed && <div className="font-bold mb-1">無法播放發音，請檢查以下項目：</div>}
+              <ul className="list-disc pl-4 space-y-0.5">
+                <li>調高手機音量，並確認 iPhone 側邊靜音鍵沒有開啟（橘色表示靜音）。</li>
+                <li>需要連網才能播放真人發音；離線時改用系統語音，Android 需安裝英文語音包。</li>
+                {isInAppBrowser() && (
+                  <li className="font-bold">
+                    你正在使用 LINE / Facebook 等內建瀏覽器，請改用右上角選單「以瀏覽器開啟」（Safari / Chrome）。
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
 
           {/* Auto play switch */}
           <div className="pt-2 border-t border-slate-200 flex items-center justify-between">

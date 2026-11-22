@@ -1,10 +1,14 @@
 /**
- * Enhanced Web Speech API Utility
- * Solves browser front-audio clipping on first click by:
- * 1. Preloading & caching system voices
- * 2. Pre-warming audio context & speech engine on page interaction
- * 3. Introducing micro-timeout after cancel() to prevent voice buffer truncation
- * 4. Explicitly binding high-quality locale voices
+ * Pronunciation utility
+ *
+ * Two engines, chosen per device:
+ *  - Recordings: real human audio from dictionaryapi.dev played through one shared HTML5 <audio>
+ *    element. It is "unlocked" on the first touch so iOS lets us play it after the async lookup,
+ *    and <audio> is not muted by the iOS silent switch (speechSynthesis is).
+ *  - TTS: Web Speech API, used for phrases, offline, and when no recording exists.
+ *
+ * iOS (single words) → recording first, TTS as fallback.
+ * Everything else    → TTS first, recording as fallback when TTS is silent/unavailable.
  */
 
 export interface SpeechOptions {
@@ -21,11 +25,26 @@ export interface SpeechCallbacks {
 }
 
 let cachedVoices: SpeechSynthesisVoice[] = [];
-let isInitialized = false;
 let activeUtterance: SpeechSynthesisUtterance | null = null;
 
 // Android reports "en_US", desktop reports "en-US"
 const normLang = (l: string) => (l || '').replace('_', '-').toLowerCase();
+
+const hasTTS = () => typeof window !== 'undefined' && 'speechSynthesis' in window;
+
+const isIOS = () =>
+  typeof navigator !== 'undefined' &&
+  (/iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+/** LINE / Facebook / Instagram etc. in-app browsers, which often lack speech synthesis */
+export const isInAppBrowser = () =>
+  typeof navigator !== 'undefined' &&
+  /Line\/|FBAN|FBAV|FB_IAB|Instagram|MicroMessenger|; wv\)/i.test(navigator.userAgent);
+
+export const isMobileDevice = () =>
+  typeof navigator !== 'undefined' &&
+  (/Android|iP(hone|ad|od)|Mobile/i.test(navigator.userAgent) || isIOS());
 
 function pickVoice(targetLang: string): SpeechSynthesisVoice | undefined {
   let voices = cachedVoices;
@@ -50,53 +69,35 @@ function pickVoice(targetLang: string): SpeechSynthesisVoice | undefined {
   return loose[0];
 }
 
-export function initSpeechEngine() {
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-  if (isInitialized) return;
+// ---------------------------------------------------------------------------
+// Recording engine (HTML5 <audio>)
+// ---------------------------------------------------------------------------
+const SILENT_WAV =
+  'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
 
-  const updateVoices = () => {
-    try {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices && voices.length > 0) {
-        cachedVoices = voices;
-        isInitialized = true;
-      }
-    } catch {
-      // Ignore in unsupported environments
-    }
-  };
+const audioUrlCache = new Map<string, string | null>();
+let sharedAudio: HTMLAudioElement | null = null;
+let audioUnlocked = false;
+let playToken = 0;
 
-  updateVoices();
-
-  if (window.speechSynthesis.onvoiceschanged !== undefined) {
-    window.speechSynthesis.onvoiceschanged = updateVoices;
+/** Must run inside a user gesture. Plays a silent clip so iOS allows later programmatic play(). */
+function unlockAudio() {
+  if (typeof Audio === 'undefined') return;
+  if (!sharedAudio) sharedAudio = new Audio();
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+  try {
+    sharedAudio.src = SILENT_WAV;
+    sharedAudio.play().catch(() => {
+      audioUnlocked = false;
+    });
+  } catch {
+    audioUnlocked = false;
   }
-
-  // Pre-warm audio on initial user touch or click
-  const warmUp = () => {
-    try {
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.resume();
-      }
-    } catch {
-      // Ignore
-    }
-    window.removeEventListener('click', warmUp);
-    window.removeEventListener('touchstart', warmUp);
-    window.removeEventListener('keydown', warmUp);
-  };
-
-  window.addEventListener('click', warmUp, { once: true, passive: true });
-  window.addEventListener('touchstart', warmUp, { once: true, passive: true });
-  window.addEventListener('keydown', warmUp, { once: true, passive: true });
 }
 
-// ---- HTML5 <audio> fallback (real recordings) for devices without a usable TTS engine ----
-const audioUrlCache = new Map<string, string | null>();
-let fallbackAudio: HTMLAudioElement | null = null;
-
 async function lookupAudioUrl(word: string, lang: string): Promise<string | null> {
-  const key = `${word.toLowerCase()}|${lang}`;
+  const key = `${word.toLowerCase()}|${normLang(lang)}`;
   if (audioUrlCache.has(key)) return audioUrlCache.get(key)!;
   let url: string | null = null;
   try {
@@ -110,67 +111,89 @@ async function lookupAudioUrl(word: string, lang: string): Promise<string | null
       const accent = normLang(lang) === 'en-gb' ? '-uk' : '-us';
       url = urls.find((u) => u.includes(accent)) || urls[0] || null;
     }
+    audioUrlCache.set(key, url); // cache hits and "not found", not network errors
   } catch {
     url = null;
   }
-  audioUrlCache.set(key, url);
   return url;
 }
 
-function playFallbackAudio(text: string, lang: string, options: SpeechOptions | undefined, callbacks?: SpeechCallbacks) {
-  // Create + touch the element synchronously so it stays tied to the user gesture on mobile
-  if (fallbackAudio) fallbackAudio.pause();
-  const audio = new Audio();
-  fallbackAudio = audio;
-  audio.volume = options?.volume ?? 1.0;
+/** Resolves true if a recording actually started playing, false if the caller should fall back. */
+async function playRecording(
+  text: string,
+  lang: string,
+  options: SpeechOptions | undefined,
+  callbacks?: SpeechCallbacks
+): Promise<boolean> {
+  if (typeof Audio === 'undefined') return false;
+  const token = ++playToken;
+  const url = await lookupAudioUrl(text, lang);
+  if (token !== playToken) return true; // superseded by a newer request; stay silent
+  if (!url) return false;
 
-  lookupAudioUrl(text, lang).then((url) => {
-    if (!url || fallbackAudio !== audio) {
-      if (!url) callbacks?.onError?.();
-      return;
-    }
-    audio.onplay = () => callbacks?.onStart?.();
+  if (!sharedAudio) sharedAudio = new Audio();
+  const audio = sharedAudio;
+
+  return new Promise<boolean>((resolve) => {
+    let started = false;
+    // iOS Safari resets playbackRate whenever the source changes → re-apply on load and on play
+    const rate = Math.min(Math.max(options?.rate ?? 1, 0.7), 1.2);
+    const applyRate = () => {
+      try { audio.playbackRate = rate; } catch { /* ignore */ }
+    };
+    audio.onloadedmetadata = applyRate;
+    audio.onplaying = () => {
+      applyRate();
+      started = true;
+      callbacks?.onStart?.();
+      resolve(true);
+    };
     audio.onended = () => callbacks?.onEnd?.();
-    audio.onerror = () => callbacks?.onError?.();
-    audio.src = url;
-    audio.play().catch((err) => callbacks?.onError?.(err));
+    audio.onerror = () => {
+      if (!started) resolve(false);
+      else callbacks?.onEnd?.();
+    };
+    try {
+      audio.pause();
+      audio.src = url;
+      audio.volume = options?.volume ?? 1.0;
+      applyRate();
+      audio.play().catch(() => {
+        if (!started) resolve(false);
+      });
+    } catch {
+      resolve(false);
+    }
   });
 }
 
-export function speakWord(
+// ---------------------------------------------------------------------------
+// TTS engine (Web Speech API)
+// ---------------------------------------------------------------------------
+/** Speaks via Web Speech API. Calls onFail (instead of onError) if it stays silent or errors out. */
+function speakTTS(
   text: string,
-  options?: SpeechOptions,
-  callbacks?: SpeechCallbacks
+  targetLang: string,
+  options: SpeechOptions | undefined,
+  callbacks: SpeechCallbacks | undefined,
+  onFail: (err?: any) => void
 ) {
-  const cleanText = (text || '').trim();
-  const targetLang = options?.lang || 'en-US';
-
-  if (!cleanText) {
-    callbacks?.onError?.();
-    return;
-  }
-
-  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-    playFallbackAudio(cleanText, targetLang, options, callbacks);
-    return;
-  }
-
   try {
     const synth = window.speechSynthesis;
     let started = false;
-    let fellBack = false;
+    let failed = false;
 
-    // Engine present but silent (no voices / WebView / missing TTS data): switch to <audio>
-    const fallback = () => {
-      if (fellBack || started) return;
-      fellBack = true;
+    const fail = (err?: any) => {
+      if (failed || started) return;
+      failed = true;
       try { synth.cancel(); } catch { /* ignore */ }
-      playFallbackAudio(cleanText, targetLang, options, callbacks);
+      onFail(err);
     };
-    const watchdog = window.setTimeout(fallback, 1500);
+    // Engine present but silent (no voices / WebView / missing TTS data)
+    const watchdog = window.setTimeout(() => fail(), 1500);
 
     const speakNow = (useVoice: boolean) => {
-      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = targetLang;
       utterance.rate = options?.rate ?? 0.85;
       utterance.pitch = options?.pitch ?? 1.0;
@@ -197,16 +220,17 @@ export function speakWord(
         if (activeUtterance === utterance) activeUtterance = null;
         const reason = (e as SpeechSynthesisErrorEvent)?.error;
         if (reason === 'canceled' || reason === 'interrupted') {
-          if (!fellBack) callbacks?.onEnd?.();
+          if (!failed) callbacks?.onEnd?.();
           return;
         }
-        // Voice failed (e.g. network voice offline / unavailable on mobile): retry with the system default voice
-        if (useVoice) {
+        // Voice failed (e.g. network voice offline / unavailable): retry once with the system default
+        if (useVoice && !started) {
           speakNow(false);
           return;
         }
         window.clearTimeout(watchdog);
-        fallback();
+        if (started) callbacks?.onEnd?.();
+        else fail(e);
       };
 
       synth.speak(utterance);
@@ -221,8 +245,8 @@ export function speakWord(
           synth.resume();
           speakNow(true);
         } catch (err) {
-          console.warn('Speech synthesis execution failed:', err);
-          callbacks?.onError?.(err);
+          window.clearTimeout(watchdog);
+          fail(err);
         }
       }, 50);
     } else {
@@ -230,7 +254,95 @@ export function speakWord(
       speakNow(true);
     }
   } catch (err) {
-    console.warn('Speech synthesis initialization failed:', err);
-    callbacks?.onError?.(err);
+    console.warn('Speech synthesis failed:', err);
+    onFail(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+export function initSpeechEngine() {
+  if (typeof window === 'undefined') return;
+
+  if (hasTTS()) {
+    const updateVoices = () => {
+      try {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices && voices.length > 0) cachedVoices = voices;
+      } catch {
+        // Ignore in unsupported environments
+      }
+    };
+    updateVoices();
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+  }
+
+  // First touch/click: unlock <audio> and the speech engine (iOS requires a gesture)
+  const warmUp = () => {
+    unlockAudio();
+    try {
+      if (hasTTS()) {
+        window.speechSynthesis.resume();
+        if (isIOS() && !window.speechSynthesis.speaking) {
+          const u = new SpeechSynthesisUtterance(' ');
+          u.volume = 0;
+          window.speechSynthesis.speak(u);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+    window.removeEventListener('click', warmUp);
+    window.removeEventListener('touchend', warmUp);
+    window.removeEventListener('keydown', warmUp);
+  };
+
+  window.addEventListener('click', warmUp, { passive: true });
+  window.addEventListener('touchend', warmUp, { passive: true });
+  window.addEventListener('keydown', warmUp, { passive: true });
+}
+
+export function speakWord(
+  text: string,
+  options?: SpeechOptions,
+  callbacks?: SpeechCallbacks
+) {
+  const cleanText = (text || '').trim();
+  const targetLang = options?.lang || 'en-US';
+
+  if (!cleanText) {
+    callbacks?.onError?.();
+    return;
+  }
+
+  // Must be synchronous, inside the click handler
+  unlockAudio();
+  playToken++; // cancels any in-flight recording lookup
+  if (sharedAudio) {
+    try { sharedAudio.pause(); } catch { /* ignore */ }
+  }
+
+  const isSingleWord = /^[A-Za-z][A-Za-z'-]*$/.test(cleanText);
+
+  const tryTTS = (onFail: (err?: any) => void) => {
+    if (!hasTTS()) return onFail();
+    speakTTS(cleanText, targetLang, options, callbacks, onFail);
+  };
+  const tryRecording = (onFail: () => void) => {
+    if (!isSingleWord) return onFail();
+    playRecording(cleanText, targetLang, options, callbacks).then((ok) => {
+      if (!ok) onFail();
+    });
+  };
+  const giveUp = (err?: any) => callbacks?.onError?.(err);
+
+  if (isIOS() && isSingleWord) {
+    // iOS: TTS is muted by the silent switch and often unreliable → recording first
+    tryRecording(() => tryTTS(giveUp));
+  } else {
+    tryTTS(() => tryRecording(giveUp));
   }
 }

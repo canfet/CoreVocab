@@ -22,7 +22,8 @@ const cspPlugin = (): Plugin => ({
           // Apps Script 會先回 302 到 script.googleusercontent.com
           "connect-src 'self' https://script.google.com https://script.googleusercontent.com https://api.dictionaryapi.dev",
           // 手機沒有 TTS 語音時的備援：播放 dictionaryapi.dev 的真人發音
-          "media-src 'self' https://api.dictionaryapi.dev",
+          // data: 用於 iOS 首次觸控時播放一段靜音來解鎖 <audio>
+          "media-src 'self' data: https://api.dictionaryapi.dev",
           "object-src 'none'",
           "base-uri 'self'",
           "form-action 'none'",
