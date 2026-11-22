@@ -79,6 +79,7 @@ const audioUrlCache = new Map<string, string | null>();
 let sharedAudio: HTMLAudioElement | null = null;
 let audioUnlocked = false;
 let playToken = 0;
+let pendingEnd: (() => void) | null = null;
 
 /** Must run inside a user gesture. Plays a silent clip so iOS allows later programmatic play(). */
 function unlockAudio() {
@@ -118,39 +119,50 @@ async function lookupAudioUrl(word: string, lang: string): Promise<string | null
   return url;
 }
 
-/** Resolves true if a recording actually started playing, false if the caller should fall back. */
-async function playRecording(
-  text: string,
-  lang: string,
-  options: SpeechOptions | undefined,
-  callbacks?: SpeechCallbacks
-): Promise<boolean> {
-  if (typeof Audio === 'undefined') return false;
-  const token = ++playToken;
-  const url = await lookupAudioUrl(text, lang);
-  if (token !== playToken) return true; // superseded by a newer request; stay silent
-  if (!url) return false;
+/** Direct audio URL usable as <audio src> with no lookup → play() can run synchronously in the tap */
+const directAudioUrl = (text: string, lang: string) =>
+  `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(text)}&type=${normLang(lang) === 'en-gb' ? 1 : 2}`;
 
+/**
+ * Plays a URL on the shared <audio>. Resolves true once playback really started, false on
+ * error / stall so the caller can fall back. The audio.play() call happens synchronously.
+ */
+function playAudioUrl(url: string, options: SpeechOptions | undefined, callbacks?: SpeechCallbacks): Promise<boolean> {
+  if (typeof Audio === 'undefined') return Promise.resolve(false);
   if (!sharedAudio) sharedAudio = new Audio();
   const audio = sharedAudio;
 
   return new Promise<boolean>((resolve) => {
     let started = false;
-    // iOS Safari resets playbackRate whenever the source changes → re-apply on load and on play
+    let settled = false;
     const rate = Math.min(Math.max(options?.rate ?? 1, 0.7), 1.2);
+    // iOS Safari resets playbackRate whenever the source changes → re-apply on load and on play
     const applyRate = () => {
       try { audio.playbackRate = rate; } catch { /* ignore */ }
     };
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      resolve(ok);
+    };
+    // Network stall / blocked in a WebView: don't leave the UI waiting
+    const timer = window.setTimeout(() => {
+      if (started) return;
+      try { audio.pause(); } catch { /* ignore */ }
+      settle(false);
+    }, 4500);
+
     audio.onloadedmetadata = applyRate;
     audio.onplaying = () => {
       applyRate();
       started = true;
+      settle(true);
       callbacks?.onStart?.();
-      resolve(true);
     };
     audio.onended = () => callbacks?.onEnd?.();
     audio.onerror = () => {
-      if (!started) resolve(false);
+      if (!started) settle(false);
       else callbacks?.onEnd?.();
     };
     try {
@@ -159,12 +171,24 @@ async function playRecording(
       audio.volume = options?.volume ?? 1.0;
       applyRate();
       audio.play().catch(() => {
-        if (!started) resolve(false);
+        if (!started) settle(false);
       });
     } catch {
-      resolve(false);
+      settle(false);
     }
   });
+}
+
+/** Last resort for single words: recording looked up from dictionaryapi.dev (async). */
+async function playRecording(
+  text: string,
+  lang: string,
+  options: SpeechOptions | undefined,
+  callbacks?: SpeechCallbacks
+): Promise<boolean> {
+  const url = await lookupAudioUrl(text, lang);
+  if (!url) return false;
+  return playAudioUrl(url, options, callbacks);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,31 +342,61 @@ export function speakWord(
     return;
   }
 
-  // Must be synchronous, inside the click handler
-  unlockAudio();
-  playToken++; // cancels any in-flight recording lookup
-  if (sharedAudio) {
-    try { sharedAudio.pause(); } catch { /* ignore */ }
+  // Reset the UI state of whoever was playing before (e.g. another word's button)
+  if (pendingEnd) {
+    const prev = pendingEnd;
+    pendingEnd = null;
+    try { prev(); } catch { /* ignore */ }
   }
+  const id = ++playToken; // invalidates every callback of the previous request
+  const alive = () => id === playToken;
+
+  const cb: SpeechCallbacks = {
+    onStart: () => { if (alive()) callbacks?.onStart?.(); },
+    onEnd: () => {
+      if (!alive()) return;
+      pendingEnd = null;
+      callbacks?.onEnd?.();
+    },
+    onError: (e) => {
+      if (!alive()) return;
+      pendingEnd = null;
+      callbacks?.onError?.(e);
+    },
+  };
+  pendingEnd = () => callbacks?.onEnd?.();
+
+  // Stop whatever is currently playing
+  try { sharedAudio?.pause(); } catch { /* ignore */ }
+  try {
+    if (hasTTS() && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+      window.speechSynthesis.cancel();
+    }
+  } catch { /* ignore */ }
 
   const isSingleWord = /^[A-Za-z][A-Za-z'-]*$/.test(cleanText);
+  const giveUp = (err?: any) => cb.onError?.(err);
 
-  const tryTTS = (onFail: (err?: any) => void) => {
-    if (!hasTTS()) return onFail();
-    speakTTS(cleanText, targetLang, options, callbacks, onFail);
-  };
-  const tryRecording = (onFail: () => void) => {
-    if (!isSingleWord) return onFail();
-    playRecording(cleanText, targetLang, options, callbacks).then((ok) => {
-      if (!ok) onFail();
+  // 3) dictionaryapi.dev recording (single words only)
+  const lastResort = () => {
+    if (!isSingleWord) return giveUp();
+    playRecording(cleanText, targetLang, options, cb).then((ok) => {
+      if (alive() && !ok) giveUp();
     });
   };
-  const giveUp = (err?: any) => callbacks?.onError?.(err);
+  // 2) Web Speech API
+  const tryTTS = () => {
+    if (!hasTTS()) return lastResort();
+    speakTTS(cleanText, targetLang, options, cb, () => { if (alive()) lastResort(); });
+  };
 
-  if (isIOS() && isSingleWord) {
-    // iOS: TTS is muted by the silent switch and often unreliable → recording first
-    tryRecording(() => tryTTS(giveUp));
-  } else {
-    tryTTS(() => tryRecording(giveUp));
+  // 1) Direct audio, started synchronously inside the tap: works with the iOS silent switch,
+  //    in LINE/FB/IG in-app browsers, and on phones without a TTS voice. Skipped when offline.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    tryTTS();
+    return;
   }
+  playAudioUrl(directAudioUrl(cleanText, targetLang), options, cb).then((ok) => {
+    if (alive() && !ok) tryTTS();
+  });
 }

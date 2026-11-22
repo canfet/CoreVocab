@@ -23,7 +23,8 @@ const cspPlugin = (): Plugin => ({
           "connect-src 'self' https://script.google.com https://script.googleusercontent.com https://api.dictionaryapi.dev",
           // 手機沒有 TTS 語音時的備援：播放 dictionaryapi.dev 的真人發音
           // data: 用於 iOS 首次觸控時播放一段靜音來解鎖 <audio>
-          "media-src 'self' data: https://api.dictionaryapi.dev",
+          // dict.youdao.com：可直接當 <audio src> 的發音網址，點擊當下就能同步播放
+          "media-src 'self' data: https://dict.youdao.com https://api.dictionaryapi.dev",
           "object-src 'none'",
           "base-uri 'self'",
           "form-action 'none'",
