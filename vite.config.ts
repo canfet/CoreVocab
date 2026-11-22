@@ -20,7 +20,9 @@ const cspPlugin = (): Plugin => ({
           "img-src 'self' data:",
           "font-src 'self' data:",
           // Apps Script 會先回 302 到 script.googleusercontent.com
-          "connect-src 'self' https://script.google.com https://script.googleusercontent.com",
+          "connect-src 'self' https://script.google.com https://script.googleusercontent.com https://api.dictionaryapi.dev",
+          // 手機沒有 TTS 語音時的備援：播放 dictionaryapi.dev 的真人發音
+          "media-src 'self' https://api.dictionaryapi.dev",
           "object-src 'none'",
           "base-uri 'self'",
           "form-action 'none'",
@@ -34,6 +36,14 @@ const cspPlugin = (): Plugin => ({
 // 每次建置的版本代碼；前端比對 version.json 就知道網站是否有新版本
 const BUILD_ID = Date.now().toString(36);
 
+// config.js 是部署時才產生的，GitHub Pages 會讓瀏覽器快取 10 分鐘。
+// 在網址後面加上本次建置的版本代碼，每次部署就一定會抓到新的 config.js。
+const configCacheBustPlugin = (): Plugin => ({
+  name: 'config-cache-bust',
+  apply: 'build',
+  transformIndexHtml: (html) => html.replace(/(config\.js)(["'])/, `$1?v=${BUILD_ID}$2`),
+});
+
 const versionPlugin = (): Plugin => ({
   name: 'emit-version-json',
   apply: 'build',
@@ -46,7 +56,7 @@ export default defineConfig(({ command }) => ({
   define: { __APP_VERSION__: JSON.stringify(command === 'build' ? BUILD_ID : 'dev') },
   // 相對路徑：不論部署在 https://帳號.github.io/任何專案名/ 或自訂網域，資源都能載入
   base: './',
-  plugins: [react(), tailwindcss(), cspPlugin(), versionPlugin()],
+  plugins: [react(), tailwindcss(), cspPlugin(), versionPlugin(), configCacheBustPlugin()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),

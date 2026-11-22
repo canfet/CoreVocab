@@ -44,8 +44,10 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
+  // cache: 'no-cache' = 每次都向伺服器確認有沒有更新（沒變動時只回 304，很快）。
+  // 否則 GitHub Pages 的 max-age=600 會讓首頁與 config.js 最多 10 分鐘拿到舊內容。
   e.respondWith(
-    fetch(req)
+    fetch(req, { cache: 'no-cache' })
       .then((res) => remember(e, req, res))
       .catch(() => caches.match(req).then((hit) => hit || caches.match(self.registration.scope)))
   );
